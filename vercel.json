@@ -1,158 +1,432 @@
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 import sqlite3
-import requests
-import os
 import logging
-from bot import bot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, date
-from utils.save_avatar import save_avatar
-import random
+import sys
+from datetime import datetime, date, timedelta
 
+# --- logging setup ---
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
+    format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+    ]
 )
-logger = logging.getLogger("blomblom-flask")
-SUPERADMIN_ID = "350691086"
-BOT_NOTIFY_URL = "https://c9434d554543.ngrok-free.app/notify"
-BOT_ROLE_URL = "https://c9434d554543.ngrok-free.app/notify_role"
-BOT_TOKEN = "8250860304:AAFbp2PMZom6PbYqvNz_Y1DEQEOSRHeryWU"
+logger = logging.getLogger("blomblom-bot")
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static/avatars'
+TOKEN = "8250860304:AAFbp2PMZom6PbYqvNz_Y1DEQEOSRHeryWU"
+WEBAPP_URL = "https://c9434d554543.ngrok-free.app/webapp"
+PROFILE_URL = "https://c9434d554543.ngrok-free.app/profile"
+JOB_FORM_URL = "https://c9434d554543.ngrok-free.app/job_form"
+USERS_ADMIN_URL = "https://c9434d554543.ngrok-free.appadmin/users"
+SUPERADMIN_ID = "350691086"
+
+bot = telebot.TeleBot(TOKEN)
 
 def init_db():
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            telegram_id TEXT PRIMARY KEY,
-            last_name TEXT,
-            first_name TEXT,
-            middle_name TEXT,
-            username TEXT,
-            birthdate TEXT,
-            city TEXT,
-            district TEXT,
-            phone TEXT,
-            skills TEXT,
-            role TEXT,
-            avatar TEXT,
-            mute_mode INTEGER DEFAULT 0,
-            mute_remind_at TEXT,
-            mute_remind_stage INTEGER DEFAULT 0
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_number TEXT,
-            customer_name TEXT,
-            customer_phone TEXT,
-            job_type TEXT,
-            job_description TEXT,
-            hour_rate INTEGER,
-            min_rate INTEGER,
-            city TEXT,
-            district TEXT,
-            cargo_name TEXT,
-            people_count INTEGER,
-            work_hours INTEGER,
-            address_a TEXT,
-            floor_a INTEGER,
-            elevator_a TEXT,
-            elevator_type_a TEXT,
-            address_b TEXT,
-            floor_b INTEGER,
-            elevator_b TEXT,
-            elevator_type_b TEXT,
-            start_date TEXT,
-            start_time TEXT,
-            logistics TEXT,
-            logistics_to_addr TEXT,
-            payment_type TEXT,
-            status TEXT,
-            created_by TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS job_accepts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id INTEGER,
-            worker_telegram_id TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                telegram_id TEXT PRIMARY KEY,
+                last_name TEXT,
+                first_name TEXT,
+                middle_name TEXT,
+                username TEXT,
+                birthdate TEXT,
+                city TEXT,
+                district TEXT,
+                phone TEXT,
+                skills TEXT,
+                role TEXT,
+                avatar TEXT,
+                mute_mode INTEGER DEFAULT 0,
+                mute_remind_at TEXT,
+                mute_remind_stage INTEGER DEFAULT 0
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_number TEXT,
+                customer_name TEXT,
+                customer_phone TEXT,
+                job_type TEXT,
+                job_description TEXT,
+                hour_rate INTEGER,
+                min_rate INTEGER,
+                city TEXT,
+                district TEXT,
+                cargo_name TEXT,
+                people_count INTEGER,
+                address_a TEXT,
+                floor_a INTEGER,
+                elevator_a TEXT,
+                elevator_type_a TEXT,
+                address_b TEXT,
+                floor_b INTEGER,
+                elevator_b TEXT,
+                elevator_type_b TEXT,
+                start_date TEXT,
+                start_time TEXT,
+                logistics TEXT,
+                payment_type TEXT,
+                status TEXT,
+                created_by TEXT,
+                work_hours INTEGER,
+                logistics_to_addr TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS job_accepts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER,
+                worker_telegram_id TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS job_messages (
+                job_id INTEGER,
+                telegram_id TEXT,
+                message_id INTEGER
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        logger.info("DB initialized successfully")
+    except Exception:
+        logger.exception("Ошибка при инициализации базы данных!")
 
 init_db()
 
+def migrate_columns():
+    columns_to_add = {
+        "jobs": [
+            ("logistics_to_addr", "TEXT"),
+            ("work_hours", "INTEGER"),
+        ],
+    }
+    for table, cols in columns_to_add.items():
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute(f"PRAGMA table_info({table})")
+        existing = [row[1] for row in c.fetchall()]
+        for col, col_type in cols:
+            if col not in existing:
+                try:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}")
+                    print(f"Добавлен столбец {col} в таблицу {table}")
+                except Exception as e:
+                    print(f"Ошибка при добавлении столбца {col} в таблицу {table}: {e}")
+        conn.commit()
+        conn.close()
+migrate_columns()
+
 def get_role(telegram_id):
+    try:
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('SELECT role FROM users WHERE telegram_id=?', (telegram_id,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        logger.exception(f"Ошибка при получении роли пользователя {telegram_id}")
+        return None
+
+def calc_age(birthdate_str):
+    try:
+        bdate = datetime.strptime(birthdate_str, "%Y-%m-%d").date()
+        today = date.today()
+        age = today.year - bdate.year - ((today.month, today.day) < (bdate.month, bdate.day))
+        return age
+    except Exception:
+        return ""
+
+def set_mute_mode(telegram_id):
+    now = datetime.now()
+    next_remind = now + timedelta(days=1)
     conn = sqlite3.connect('static/users.db')
     c = conn.cursor()
-    c.execute('SELECT role FROM users WHERE telegram_id=?', (telegram_id,))
-    row = c.fetchone()
+    c.execute('UPDATE users SET mute_mode=1, mute_remind_at=?, mute_remind_stage=1 WHERE telegram_id=?',
+              (next_remind.strftime('%Y-%m-%d %H:%M:%S'), telegram_id))
+    conn.commit()
     conn.close()
-    return row[0] if row else None
 
-def generate_job_number(city_code, date):
-    # Формируем дату в формате YYMMDD
-    date_str = date.strftime('%y%m%d')  # например, 250812
-    # Считаем заявки за этот день и город
+def unset_mute_mode(telegram_id):
     conn = sqlite3.connect('static/users.db')
     c = conn.cursor()
-    # Ищем по номеру заявки, который начинается с '843-250812-'
-    prefix = f"{city_code}-{date_str}-"
-    c.execute("SELECT COUNT(*) FROM jobs WHERE job_number LIKE ?", (f"{prefix}%",))
-    count_today = c.fetchone()[0]
+    c.execute('UPDATE users SET mute_mode=0, mute_remind_at=NULL, mute_remind_stage=0 WHERE telegram_id=?', (telegram_id,))
+    conn.commit()
     conn.close()
-    order_num = count_today + 1
-    job_number = f"{city_code}-{date_str}-{order_num}"
-    return job_number
-# -------------------- ТЕКСТЫ ЗАЯВОК --------------------
 
-def build_loader_executor_text(
-    job_number, job_description, hour_rate, min_rate, city, district,
-    start_date, start_time,
-    address_a, floor_a, elevator_a, elevator_type_a,
-    address_b=None, floor_b=None, elevator_b=None, elevator_type_b=None,
-    logistics=None, payment_type=None
-):
-    def val(v): return v if v not in [None, ""] else "не указано"
+def get_mute_mode(telegram_id):
+    try:
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('SELECT mute_mode FROM users WHERE telegram_id=?', (telegram_id,))
+        row = c.fetchone()
+        conn.close()
+        return bool(row and row[0])
+    except Exception:
+        logger.exception("Ошибка в get_mute_mode")
+        return False
 
-    text = (
-        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
-        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
-        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
-        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
-        f"<b>Город:</b> 🌆\n{val(city)}\n\n"
-        f"<b>Район:</b>\n{val(district)}\n\n"
-    )
+def main_worker_keyboard(state="normal", profile_url=None):
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    if state == "normal":
+        markup.add(KeyboardButton("Без звучный режим 🔕"))
+        markup.add(KeyboardButton("Личный кабинет 🗂", web_app=WebAppInfo(profile_url)))
+    elif state == "mute":
+        markup.add(KeyboardButton("Получать заявки ✅"))
+        markup.add(KeyboardButton("Личный кабинет 🗂", web_app=WebAppInfo(profile_url)))
+    return markup
 
-    text += (
-        f"<b>Адрес А:</b> 📍\n{val(address_a)}\n"
-        f"Этаж: {val(floor_a)}\n"
-        f"Лифт: {val(elevator_a)}\n"
-        f"Вид лифта: {val(elevator_type_a)}\n\n"
-    )
+@bot.message_handler(commands=['start'])
+def start_message(message):
+    try:
+        username = message.from_user.username
+        telegram_id = str(message.from_user.id)
+        display_name = f"@{username}" if username else telegram_id
 
-    if address_b and str(address_b).strip():
-        text += (
-            f"<b>Адрес B:</b> 📍\n{val(address_b)}\n"
-            f"Этаж: {val(floor_b)}\n"
-            f"Лифт: {val(elevator_b)}\n"
-            f"Вид лифта: {val(elevator_type_b)}\n\n"
-            f"<b>Логистика между адресам:</b> 🛸\n{val(logistics)}\n\n"
+        role = get_role(telegram_id)
+        if not role:
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            reg_url = f"{WEBAPP_URL}?telegram={telegram_id}"
+            markup.add(KeyboardButton("Регистрация", web_app=WebAppInfo(reg_url)))
+            bot.send_message(
+                message.chat.id,
+                f"Здравствуйте, {display_name}! 👋\n\nВас приветствует агрегатор заявок BlomBlom.ru 😁\n\nЗдесь вы можете получать заявки на работу с ежедневной оплатой, для этого вам нужно зарегистрироваться.",
+                reply_markup=markup
+            )
+        elif role == 'operator':
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            job_url = f"{JOB_FORM_URL}?telegram={telegram_id}"
+            markup.add(KeyboardButton("Создать заявку", web_app=WebAppInfo(job_url)))
+            bot.send_message(
+                message.chat.id,
+                f"Вы назначены оператором. Теперь вы можете создавать заявки.",
+                reply_markup=markup
+            )
+        elif telegram_id == SUPERADMIN_ID:
+            markup = ReplyKeyboardMarkup(resize_keyboard=True)
+            users_admin_url = f"{USERS_ADMIN_URL}?telegram={SUPERADMIN_ID}"
+            markup.add(KeyboardButton("Админка", web_app=WebAppInfo(users_admin_url)))
+            bot.send_message(
+                message.chat.id,
+                f"Вы суперадмин. Вот ваша панель управления.",
+                reply_markup=markup
+            )
+        elif role == 'worker':
+            profile_url = f"{PROFILE_URL}/{telegram_id}"
+            mute_mode = get_mute_mode(telegram_id)
+            if not mute_mode:
+                markup = main_worker_keyboard("normal", profile_url)
+            else:
+                markup = main_worker_keyboard("mute", profile_url)
+            bot.send_message(
+                message.chat.id,
+                f"Здравствуйте снова, {display_name}! 👋\n\nВот ваша анкета и доступные функции:",
+                reply_markup=markup
+            )
+        else:
+            bot.send_message(
+                message.chat.id,
+                f"Здравствуйте, {display_name}! Ваша роль: {role}",
+                reply_markup=ReplyKeyboardMarkup(resize_keyboard=True)
+            )
+    except Exception:
+        logger.exception("Ошибка в start_message")
+
+@bot.message_handler(content_types=['web_app_data'])
+def handle_webapp_callback(message):
+    telegram_id = str(message.from_user.id)
+    username = message.from_user.username
+    display_name = f"@{username}" if username else telegram_id
+
+    role = get_role(telegram_id)
+    profile_url = f"{PROFILE_URL}/{telegram_id}"
+    mute_mode = get_mute_mode(telegram_id)
+    if role == 'worker':
+        if not mute_mode:
+            markup = main_worker_keyboard("normal", profile_url)
+        else:
+            markup = main_worker_keyboard("mute", profile_url)
+        # Тот же текст, что и в /start
+        bot.send_message(
+            message.chat.id,
+            f"Здравствуйте снова, {display_name}! 👋\n\nВот ваша анкета и доступные функции:",
+            reply_markup=markup
+        )
+    else:
+        start_message(message)
+
+@bot.message_handler(func=lambda m: m.text == "Без звучный режим 🔕")
+def mute_mode_handler(message):
+    telegram_id = str(message.from_user.id)
+    if not get_mute_mode(telegram_id):
+        set_mute_mode(telegram_id)
+        profile_url = f"{PROFILE_URL}/{telegram_id}"
+        markup = main_worker_keyboard("mute", profile_url)
+        bot.send_message(
+            message.chat.id,
+            'Вы включили "Без звучный режим🔕"\nТеперь заявки к вам не приходят 😢',
+            reply_markup=markup
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "Беззвучный режим уже активирован."
         )
 
-    text += (
-        f"<b>Дата начала работы:</b> 📅\n{val(start_date)}\n\n"
-        f"<b>Время начала работы:</b> 🕗\n{val(start_time)}\n\n"
-        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n"
+@bot.message_handler(func=lambda m: m.text == "Получать заявки ✅")
+def unmute_mode_handler(message):
+    telegram_id = str(message.from_user.id)
+    if get_mute_mode(telegram_id):
+        unset_mute_mode(telegram_id)
+        profile_url = f"{PROFILE_URL}/{telegram_id}"
+        markup = main_worker_keyboard("normal", profile_url)
+        bot.send_message(
+            message.chat.id,
+            "Вы получаете заявки ✅",
+            reply_markup=markup
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "Вы уже получаете все новые заявки!"
+        )
+
+@bot.message_handler(func=lambda m: m.text == "Личный кабинет 🗂")
+def profile_handler(message):
+    telegram_id = str(message.from_user.id)
+    profile_url = f"{PROFILE_URL}/{telegram_id}"
+    mute_mode = get_mute_mode(telegram_id)
+    markup = main_worker_keyboard("normal" if not mute_mode else "mute", profile_url)
+    bot.send_message(
+        message.chat.id,
+        "Открываем ваш профиль...",
+        reply_markup=markup
     )
 
-    return text
+@bot.message_handler(commands=['admin'])
+def superadmin_panel(message):
+    try:
+        if str(message.from_user.id) != SUPERADMIN_ID:
+            bot.reply_to(message, "Доступ запрещён. Только суперадмин!")
+            return
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('SELECT telegram_id, role FROM users WHERE role IN ("operator", "admin")')
+        users = c.fetchall()
+        conn.close()
+        text = "Список операторов и админов:\n"
+        for u in users:
+            text += f"- {u[0]} роль: {u[1]}\n"
+        text += "\nДобавить: /add_operator <telegram_id> | /add_admin <telegram_id>\n"
+        text += "Удалить: /delete_user <telegram_id>\n"
+        bot.send_message(message.chat.id, text)
+    except Exception:
+        logger.exception("Ошибка в admin panel")
+
+@bot.message_handler(commands=['add_operator', 'add_admin'])
+def add_user(message):
+    try:
+        if str(message.from_user.id) != SUPERADMIN_ID:
+            bot.reply_to(message, "Только суперадмин может добавлять пользователей!")
+            return
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.reply_to(message, "Используйте: /add_operator <telegram_id> или /add_admin <telegram_id>")
+            return
+        user_id = parts[1]
+        role = "operator" if message.text.startswith('/add_operator') else "admin"
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('INSERT OR REPLACE INTO users (telegram_id, role) VALUES (?, ?)', (user_id, role))
+        conn.commit()
+        conn.close()
+        try:
+            if role == "operator":
+                markup = ReplyKeyboardMarkup(resize_keyboard=True)
+                job_url = f"{JOB_FORM_URL}?telegram={user_id}"
+                markup.add(KeyboardButton("Создать заявку", web_app=WebAppInfo(job_url)))
+                bot.send_message(user_id, "Вы назначены оператором! Теперь вы можете создавать заявки.", reply_markup=markup)
+            else:
+                bot.send_message(user_id, f"Вы назначены {role}ом! Добро пожаловать.")
+        except Exception as e:
+            logger.exception(f"Ошибка уведомления {user_id}: {e}")
+        bot.reply_to(message, f"{role.title()} {user_id} добавлен!")
+    except Exception:
+        logger.exception("Ошибка в add_user")
+
+@bot.message_handler(commands=['delete_user'])
+def delete_user_bot(message):
+    try:
+        if str(message.from_user.id) != SUPERADMIN_ID:
+            bot.reply_to(message, "Только суперадмин может удалять!")
+            return
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            bot.reply_to(message, "Используйте: /delete_user <telegram_id>")
+            return
+        user_id = parts[1]
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('DELETE FROM users WHERE telegram_id=? AND role IN ("operator", "admin")', (user_id,))
+        conn.commit()
+        conn.close()
+        bot.reply_to(message, f"Пользователь {user_id} удалён!")
+    except Exception:
+        logger.exception("Ошибка в delete_user_bot")
+
+@bot.message_handler(commands=['add_requests'])
+def add_requests(message):
+    try:
+        user_id = str(message.from_user.id)
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('SELECT role FROM users WHERE telegram_id=?', (user_id,))
+        row = c.fetchone()
+        conn.close()
+        if not row or row[0] != 'operator':
+            bot.reply_to(message, "Только оператор может отправлять заявки!")
+            return
+        job_url = f"{JOB_FORM_URL}?telegram={user_id}"
+        markup = ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(KeyboardButton("Создать заявку", web_app=WebAppInfo(job_url)))
+        bot.send_message(message.chat.id, "Нажмите для создания заявки:", reply_markup=markup)
+    except Exception:
+        logger.exception("Ошибка в add_requests")
+
+def accept_job_logic(job_id, worker_id):
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute("SELECT people_count FROM jobs WHERE id=?", (job_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return "Заявка не найдена"
+    max_count = int(row[0]) if row[0] else 1
+
+    c.execute("SELECT COUNT(*) FROM job_accepts WHERE job_id=?", (job_id,))
+    accepted = c.fetchone()[0]
+
+    c.execute("SELECT 1 FROM job_accepts WHERE job_id=? AND worker_telegram_id=?", (job_id, worker_id))
+    if c.fetchone():
+        conn.close()
+        return "Вы уже приняли эту заявку."
+
+    if accepted >= max_count:
+        conn.close()
+        return "Заявка уже недоступна (набрано нужное количество работников)."
+
+    c.execute("INSERT INTO job_accepts (job_id, worker_telegram_id) VALUES (?, ?)", (job_id, worker_id))
+    conn.commit()
+    conn.close()
+    return "Вы приняли заявку!"
 
 def build_loader_operator_text(
     job_number, customer_name, customer_phone, people_count,
@@ -215,39 +489,6 @@ def build_loader_operator_text(
 
     return text
 
-def build_construction_executor_text(
-    job_number, job_description, hour_rate, min_rate, work_hours,
-    city, district, address_a, logistics_to_addr,
-    start_date, start_time, payment_type
-):
-    def val(v): return v if v not in [None, ""] else "не указано"
-
-    # Добавил вывод для отладки
-    print(f"logistics_to_addr = '{logistics_to_addr}'")
-
-    text = (
-        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
-        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
-        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
-        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
-        f"<b>Кол-во рабочих часов:</b> ⏳\n{val(work_hours)}\n\n"
-        f"<b>Город:</b> 🌆\n{val(city)}\n\n"
-        f"<b>Район:</b>\n{val(district)}\n\n"
-        f"<b>Адрес:</b> 📍\n{val(address_a)}\n\n"
-    )
-
-    if logistics_to_addr and str(logistics_to_addr).strip():
-        text += (
-            f"<b>Логистика до адреса и обратно:</b> 🛸\n{logistics_to_addr}\n\n"
-        )
-
-    text += (
-        f"<b>Дата начало работы:</b> 📅\n{val(start_date)}\n\n"
-        f"<b>Время начала работы:</b> 🕗\n{val(start_time)}\n\n"
-        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n"
-    )
-
-    return text
 def build_construction_operator_text(
     job_number, customer_name, customer_phone, people_count, job_description,
     hour_rate, min_rate, work_hours, city, district, address_a, logistics_to_addr,
@@ -268,19 +509,13 @@ def build_construction_operator_text(
         f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
         f"<b>Кол-во рабочих часов:</b> ⏳\n{val(work_hours)}\n\n"
         f"<b>Город:</b> 🏙\n{val(city)}\n\n"
-        f"<b>Район :</b>\n{val(district)}\n\n"
+        f"<b>Район:</b>\n{val(district)}\n\n"
         f"<b>Адрес:</b> 📍\n{val(address_a)}\n\n"
     )
-
-    # Блок логистики только если есть и не пусто, и не строка 'None'
-    if logistics_to_addr and str(logistics_to_addr).strip().lower() != "none":
-        text += (
-            f"<b>Логистика до адреса и обратно:</b> 🛸\n{val(logistics_to_addr)}\n\n"
-        )
-
+    # Блок логистики для города НЕ выводится!
     text += (
         f"<b>Дата начало работы:</b> 🗓\n{val(start_date)}\n\n"
-        f"<b>Время начала работы ⏰</b>\n{val(start_time)}\n\n"
+        f"<b>Время начала работы:</b> ⏰\n{val(start_time)}\n\n"
         f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n\n"
         f"<b>Откликнувшийся исполнитель</b> 👷\n\n"
         f"<b>Имя:</b> 📝\n{val(worker_name)}\n\n"
@@ -290,482 +525,197 @@ def build_construction_operator_text(
     )
     return text
 
-# -------------------- /job_form --------------------
-@app.route('/job_form')
-def job_form():
-    telegram_id = request.args.get('telegram')
-    role = get_role(telegram_id)
-    if role != 'operator':
-        return "Только операторы могут создавать заявки", 403
-    city_code = "843"
-    today = datetime.now()
-    job_number = generate_job_number(city_code, today)
+def build_construction_operator_text_outside_city(
+    job_number, customer_name, customer_phone, people_count, job_description,
+    hour_rate, min_rate, work_hours, city, district, address_a, logistics_to_addr,
+    start_date, start_time, payment_type, worker_name, worker_username, worker_phone, worker_age
+):
+    def val(v): return v if v not in [None, ""] else "не указано"
+    def tel(x):
+        num = str(x).replace("+7", "").replace(" ", "").replace("-", "")
+        return f'<a href="tel:+7{num}">+7{num}</a>' if num.isdigit() and len(num) == 10 else val(x)
 
-    districts = [
-        "Вахитовский", "Авиастроительный", "Кировский",
-        "Московский", "Ново-Савиновский", "Советский", "Приволжский"
-    ]
-    cities = ["Казань"]
-    lifts = ["нет", "да", "не требуется"]
-    elevator_types = ["грузовой", "пассажирский"]
-    payment_types = ["Банковская карта", "Наличными"]
-    logistics_between = ["Предоставляет заказчик", "Самостоятельно"]
-    logistics_to_addr = ["Предоставляет заказчик", "Самостоятельно"]
-
-    return render_template(
-        'job_form.html',
-        telegram_id=telegram_id,
-        job_number=job_number,
-        districts=districts,
-        cities=cities,
-        lifts=lifts,
-        elevator_types=elevator_types,
-        payment_types=payment_types,
-        logistics_between=logistics_between,
-        logistics_to_addr=logistics_to_addr
+    text = (
+        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
+        f"<b>Имя заказчика:</b> {val(customer_name)}\n\n"
+        f"<b>Контактный номер заказчика:</b> {tel(customer_phone)}\n\n"
+        f"<b>Кол-во человек:</b> {val(people_count)}\n\n"
+        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
+        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
+        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
+        f"<b>Кол-во рабочих часов:</b> ⏳\n{val(work_hours)}\n\n"
+        f"<b>Город:</b> 🏙\n{val(city)}\n\n"
+        f"<b>Район:</b> \n{val(district)}\n\n"
+        f"<b>Адрес:</b> 📍\n{val(address_a)}\n\n"
     )
-
-# -------------------- /job_request --------------------
-@app.route('/job_request', methods=['POST'])
-def job_request():
+    # Блок логистики для "за городом" выводится всегда
+    text += (
+        f"<b>Логистика до адреса и обратно:</b> 🛸\n{val(logistics_to_addr)}\n\n"
+        f"<b>Дата начало работы:</b> 🗓\n{val(start_date)}\n\n"
+        f"<b>Время начала работы:</b> ⏰\n{val(start_time)}\n\n"
+        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n\n"
+        f"<b>Откликнувшийся исполнитель</b> 👷\n\n"
+        f"<b>Имя:</b> 📝\n{val(worker_name)}\n\n"
+        f"<b>Телеграм:</b> ✉️\n@{val(worker_username)}\n\n"
+        f"<b>Телефон:</b> 📱\n{tel(worker_phone)}\n\n"
+        f"<b>Возраст:</b> 📔\n{val(worker_age)}\n"
+    )
+    return text
+@bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
+def accept_job(call):
     try:
-        data = request.form
-        job_number = data.get('job_number')
-        customer_name = data.get('customer_name')
-        customer_phone = data.get('customer_phone', '')
-        if not customer_phone.isdigit() or len(customer_phone) != 10:
-            return jsonify({
-                'status': 'error',
-                'error': 'customer_phone_invalid',
-                'field': 'customer_phone',
-                'message': 'Введите 10-значный номер телефона заказчика без +7!'
-            }), 400
-
-        job_type = data.get('job_type')
-        job_description = data.get('job_description', '')
-        hour_rate = data.get('hour_rate')
-        min_rate = data.get('min_rate')
-        city = data.get('city')
-        district = data.get('district')
-        cargo_name = data.get('cargo_name')
-        people_count = data.get('people_count')
-        work_hours = data.get('work_hours')
-        address_a = data.get('address_a')
-        floor_a = data.get('floor_a')
-        elevator_a = data.get('elevator_a')
-        elevator_type_a = data.get('elevator_type_a')
-        address_b = data.get('address_b')
-        floor_b = data.get('floor_b')
-        elevator_b = data.get('elevator_b')
-        elevator_type_b = data.get('elevator_type_b')
-        start_date = data.get('start_date')
-        start_time = data.get('start_time')
-        logistics = data.get('logistics')
-        logistics_to_addr = data.get('logistics_to_addr')
-        payment_type = data.get('payment_type')
-        telegram_id = data.get('telegram_id')
-
-        conn = sqlite3.connect('static/users.db')
-        c = conn.cursor()
-        c.execute('''
-            INSERT INTO jobs (
-                job_number, customer_name, customer_phone, job_type, job_description, hour_rate, min_rate, city, district, cargo_name,
-                people_count, work_hours, address_a, floor_a, elevator_a, elevator_type_a,
-                address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, logistics_to_addr, payment_type, status, created_by
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ''', (
-            job_number, customer_name, "+7" + customer_phone, job_type, job_description, hour_rate, min_rate, city, district, cargo_name,
-            people_count, work_hours, address_a, floor_a, elevator_a, elevator_type_a,
-            address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, logistics_to_addr, payment_type,
-            "new", telegram_id
-        ))
-        job_id = c.lastrowid
-
-        # Фильтрация по навыкам: skills
-        c.execute('SELECT telegram_id, skills FROM users WHERE city=? AND role="worker" AND (mute_mode IS NULL OR mute_mode=0)', (city,))
-        workers = c.fetchall()
-        sent_count = 0
-        errors = []
-        sent_to = []
-
-        # Формируем текст заявки для исполнителя
-        if job_type == "Погрузочные работы":
-            job_text = build_loader_executor_text(
-                job_number=job_number or job_id,
-                job_description=job_description,
-                hour_rate=hour_rate,
-                min_rate=min_rate,
-                city=city,
-                district=district,
-                start_date=start_date,
-                start_time=start_time,
-                address_a=address_a,
-                floor_a=floor_a,
-                elevator_a=elevator_a,
-                elevator_type_a=elevator_type_a,
-                address_b=address_b,
-                floor_b=floor_b,
-                elevator_b=elevator_b,
-                elevator_type_b=elevator_type_b,
-                logistics=logistics,
-                payment_type=payment_type
-            )
-        elif job_type == "Строительные работы":
-            job_text = build_construction_executor_text(
-                job_number=job_number or job_id,
-                job_description=job_description,
-                hour_rate=hour_rate,
-                min_rate=min_rate,
-                work_hours=work_hours,
-                city=city,
-                district=district,
-                address_a=address_a,
-                logistics_to_addr=logistics_to_addr,
-                start_date=start_date,
-                start_time=start_time,
-                payment_type=payment_type
-            )
-        else:
-            job_text = "Ошибка: Неизвестный вид работ"
-
-        markup = InlineKeyboardMarkup()
-        markup.add(
-            InlineKeyboardButton("Принять ✅", callback_data=f"accept_{job_id}"),
-            InlineKeyboardButton("Отказаться 😢", callback_data=f"decline_{job_id}")
-        )
-
-        for w in workers:
-            worker_telegram_id = w[0]
-            worker_skills = w[1] or ''
-            # Фильтрация: только если навык выбран!
-            skills_list = [s.strip() for s in worker_skills.split(',') if s.strip()]
-            if job_type not in skills_list:
-                continue  # Пропустить если не подходит навык
-            try:
-                # --- ИСПРАВЛЕНО parse_mode ---
-                msg = bot.send_message(worker_telegram_id, job_text, reply_markup=markup, parse_mode="HTML")
-                sent_count += 1
-                sent_to.append(str(worker_telegram_id))
-                # Сохраняем message_id для удаления заявки, если это нужно
-                c.execute("INSERT INTO job_messages (job_id, telegram_id, message_id) VALUES (?, ?, ?)", (job_id, worker_telegram_id, msg.message_id))
-            except Exception as e:
-                errors.append({'telegram_id': worker_telegram_id, 'error': str(e)})
-
-        conn.commit()
-        conn.close()
-        logger.info(f"Заявка {job_id} отправлена {sent_count} пользователям: {', '.join(sent_to)}")
-        if errors:
-            logger.warning(f"Ошибки отправки: {errors}")
-        # Добавлено уведомление, которое используется на фронте!
-        return jsonify({
-            'status': 'ok',
-            'sent_count': sent_count,
-            'errors': errors,
-            'message': 'Заявка успешно создана!'
-        })
-    except Exception as e:
-        logger.exception("Ошибка при создании заявки")
-        return jsonify({'status': 'error', 'error': str(e), 'message': 'Ошибка при создании заявки'}), 500
-
-# Для заявки оператору после принятия исполнителем
-def send_job_accept_to_operator(job_id, worker_id):
-    try:
-        conn = sqlite3.connect('static/users.db')
-        c = conn.cursor()
-        c.execute('SELECT last_name, first_name, middle_name, username, phone, birthdate FROM users WHERE telegram_id=?', (worker_id,))
-        worker = c.fetchone()
-        c.execute('''SELECT job_number, customer_name, customer_phone, people_count, job_description, hour_rate, min_rate,
-                            city, district, address_a, floor_a, elevator_a, elevator_type_a,
-                            address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, payment_type, created_by
-                        FROM jobs WHERE id=?''', (job_id,))
-        job = c.fetchone()
-        conn.close()
-        if worker and job:
-            job_number, customer_name, customer_phone, people_count, job_description, hour_rate, min_rate, \
-            city, district, address_a, floor_a, elevator_a, elevator_type_a, address_b, floor_b, elevator_b, \
-            elevator_type_b, start_date, start_time, logistics, payment_type, operator_id = job
-            worker_name = f"{worker[0]} {worker[1]} {worker[2]}"
-            worker_username = worker[3]
-            worker_phone = worker[4]
-            birthdate = worker[5]
-            # расчет возраста
-            age = ""
-            if birthdate:
-                try:
-                    from datetime import date
-                    bd = datetime.strptime(birthdate, "%Y-%m-%d").date()
-                    today = date.today()
-                    age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
-                except:
-                    age = ""
-            operator_text = build_loader_operator_text(
-                job_number=job_number,
-                customer_name=customer_name,
-                customer_phone=customer_phone.replace("+7", ""),
-                people_count=people_count,
-                job_description=job_description,
-                hour_rate=hour_rate,
-                min_rate=min_rate,
-                city=city,
-                district=district,
-                address_a=address_a,
-                floor_a=floor_a,
-                elevator_a=elevator_a,
-                elevator_type_a=elevator_type_a,
-                address_b=address_b,
-                floor_b=floor_b,
-                elevator_b=elevator_b,
-                elevator_type_b=elevator_type_b,
-                logistics=logistics,
-                start_date=start_date,
-                start_time=start_time,
-                payment_type=payment_type,
-                worker_name=worker_name,
-                worker_username=worker_username,
-                worker_phone=worker_phone,
-                worker_age=age
-            )
-            # --- ИСПРАВЛЕНО parse_mode ---
-            bot.send_message(operator_id, operator_text, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Ошибка отправки оператору: {e}")
-# Остальные функции (регистрация, профиль, админка и т.д.) остаются без изменений
-
-@app.route('/webapp')
-def webapp():
-    telegram_id = request.args.get('telegram')
-    today = date.today().strftime("%Y-%m-%d")
-    return render_template('register.html', telegram_id=telegram_id, today=today)
-
-@app.route('/register', methods=['POST'])
-def register():
-    import re
-    import requests
-    from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
-
-    data = request.form
-    telegram_id = data.get('telegram_id')
-    avatar_file = request.files.get('avatar')
-
-    if not avatar_file or avatar_file.filename.strip() == '':
-        return jsonify({'status': 'error', 'error': 'avatar_required', 'message': 'Пожалуйста, выберите фото для профиля!'}), 400
-
-    phone = data.get('phone', '')
-    if not phone.isdigit() or len(phone) != 10:
-        return jsonify({'status': 'error', 'error': 'phone_invalid', 'field': 'phone', 'message': 'Введите 10-значный номер телефона!'}), 400
-
-    username = data.get('username', '')
-    if not re.fullmatch(r'[a-zA-Z0-9_]{5,32}', username):
-        return jsonify({'status': 'error', 'error': 'username_invalid', 'field': 'username', 'message': 'Некорректный username!'}), 400
-
-    avatar_filename = save_avatar(avatar_file, telegram_id)
-
-    last_name = data.get('last_name', '')
-    first_name = data.get('first_name', '')
-    middle_name = data.get('middle_name', '')
-    birthdate = data.get('birthdate', '')
-    city = data.get('city', '')
-    district = data.get('district', '')
-    skills = data.getlist('skills')
-    if isinstance(skills, list):
-        skills = ', '.join(skills)
-
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    c.execute('SELECT role FROM users WHERE telegram_id=?', (telegram_id,))
-    role = c.fetchone()
-    if not role:
-        c.execute('''
-            INSERT OR REPLACE INTO users (telegram_id, last_name, first_name, middle_name, username, birthdate, city, district, phone, skills, role, avatar, mute_mode, mute_remind_at, mute_remind_stage)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)
-        ''', (
-            telegram_id,
-            last_name,
-            first_name,
-            middle_name,
-            username,
-            birthdate,
-            city,
-            district,
-            phone,
-            skills,
-            'worker',
-            avatar_filename
-        ))
-    else:
-        c.execute('''
-            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=?, avatar=? WHERE telegram_id=?
-        ''', (
-            last_name,
-            first_name,
-            middle_name,
-            username,
-            birthdate,
-            city,
-            district,
-            phone,
-            skills,
-            avatar_filename,
-            telegram_id
-        ))
-    conn.commit()
-    conn.close()
-
-    profile_url = f"https://821c5e5165f4.ngrok-free.app/profile/{telegram_id}"
-
-    try:
-        # Меню для обычного режима (mute_mode == 0)
-        reply_markup = {
-            "keyboard": [
-                [ {"text": "Без звучный режим 🔕"} ],
-                [ {
-                    "text": "Личный кабинет 🗂",
-                    "web_app": { "url": profile_url }
-                } ]
-            ],
-            "resize_keyboard": True,
-            "one_time_keyboard": False
-        }
-        msg = (
-            "Ваш профиль успешно зарегистрирован 🎊\n\n"
-            "Вот ваша анкета и доступные функции:"
-        )
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": telegram_id,
-                "text": msg,
-                "reply_markup": reply_markup
-            }
-        )
-    except Exception as e:
-        print("Ошибка отправки сообщения боту:", e)
-
-    return jsonify({'status': 'ok'})
-
-def calc_age(birthdate_str):
-    try:
-        bdate = datetime.strptime(birthdate_str, "%Y-%m-%d").date()
-        today = date.today()
-        age = today.year - bdate.year - ((today.month, today.day) < (bdate.month, bdate.day))
-        return age
-    except Exception:
-        return ""
-
-@app.route('/profile/<telegram_id>', methods=['GET'])
-def profile(telegram_id):
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    c.execute('SELECT last_name, first_name, middle_name, username, birthdate, city, district, phone, skills, role, avatar FROM users WHERE telegram_id=?', (telegram_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        birthdate = row[4]
-        age = calc_age(birthdate) if birthdate else ""
-        return render_template(
-            'profile.html',
-            telegram_id=telegram_id,
-            last_name=row[0],
-            first_name=row[1],
-            middle_name=row[2],
-            username=row[3],
-            birthdate=birthdate,
-            age=age,
-            city=row[5],
-            district=row[6],
-            phone=row[7],
-            skills=row[8],
-            role=row[9],
-            avatar=row[10]
-        )
-    else:
-        return "Профиль не найден", 404
-
-@app.route('/edit_profile/<telegram_id>', methods=['POST'])
-def edit_profile(telegram_id):
-    data = request.form
-    avatar_file = request.files.get('avatar')
-    avatar_filename = save_avatar(avatar_file, telegram_id) if avatar_file and avatar_file.filename else None
-    birthdate = data.get('birthdate', '')
-    skills = data.getlist('skills')
-    if isinstance(skills, list):
-        skills = ', '.join(skills)
-
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    if avatar_filename:
-        c.execute('''
-            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=?, avatar=? WHERE telegram_id=?
-        ''', (
-            data.get('last_name'),
-            data.get('first_name'),
-            data.get('middle_name'),
-            data.get('username'),
-            birthdate,
-            data.get('city'),
-            data.get('district'),
-            data.get('phone'),
-            skills,
-            avatar_filename,
-            telegram_id
-        ))
-    else:
-        c.execute('''
-            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=? WHERE telegram_id=?
-        ''', (
-            data.get('last_name'),
-            data.get('first_name'),
-            data.get('middle_name'),
-            data.get('username'),
-            birthdate,
-            data.get('city'),
-            data.get('district'),
-            data.get('phone'),
-            skills,
-            telegram_id
-        ))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('profile', telegram_id=telegram_id))
-
-@app.route('/admin/users', methods=['GET', 'POST'])
-def admin_users():
-    telegram_id = request.args.get('telegram')
-    if telegram_id != SUPERADMIN_ID:
-        return "Только суперадмин может управлять пользователями!", 403
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    if request.method == 'POST':
-        user_id = request.form['telegram_id']
-        role = request.form.get('role', 'operator')
-        c.execute('INSERT OR REPLACE INTO users (telegram_id, role) VALUES (?, ?)', (user_id, role))
-        conn.commit()
+        job_id = int(call.data.split('_')[1])
+        worker_id = str(call.from_user.id)
+        result = accept_job_logic(job_id, worker_id)
+        bot.answer_callback_query(call.id, result)
         try:
-            requests.post(BOT_ROLE_URL, json={'telegram_id': user_id, 'role': role})
-        except Exception:
-            pass
-    c.execute('SELECT telegram_id, role FROM users WHERE role IN ("operator", "admin")')
-    users = c.fetchall()
-    conn.close()
-    return render_template('users_admin.html', users=users, superadmin_id=SUPERADMIN_ID)
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение у исполнителя: {e}")
 
-@app.route('/admin/delete_user', methods=['POST'])
-def delete_user():
-    telegram_id = request.form['telegram_id']
-    conn = sqlite3.connect('static/users.db')
-    c = conn.cursor()
-    c.execute('DELETE FROM users WHERE telegram_id=? AND role IN ("operator", "admin")', (telegram_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('admin_users', telegram=SUPERADMIN_ID))
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute("SELECT people_count FROM jobs WHERE id=?", (job_id,))
+        row = c.fetchone()
+        max_count = int(row[0]) if row and row[0] else 1
+        c.execute("SELECT COUNT(*) FROM job_accepts WHERE job_id=?", (job_id,))
+        accepted = c.fetchone()[0]
+        if accepted >= max_count:
+            c.execute("SELECT telegram_id, message_id FROM job_messages WHERE job_id=?", (job_id,))
+            all_msgs = c.fetchall()
+            for tg_id, msg_id in all_msgs:
+                try:
+                    bot.delete_message(tg_id, msg_id)
+                except Exception as e:
+                    logger.warning(f"Не удалось удалить заявку у {tg_id}: {e}")
+        conn.close()
 
-@app.route('/send_job/<int:job_id>', methods=['POST'])
-def send_job(job_id):
-    try:
-        resp = requests.post(BOT_NOTIFY_URL, json={'job_id': job_id})
-        return resp.json()
+        if result == "Вы приняли заявку!":
+            conn = sqlite3.connect('static/users.db')
+            c = conn.cursor()
+            c.execute(
+                'SELECT last_name, first_name, middle_name, username, phone, city, district, skills, birthdate FROM users WHERE telegram_id=?',
+                (worker_id,))
+            worker = c.fetchone()
+            c.execute('''SELECT job_number, customer_name, customer_phone, job_type, job_description, hour_rate, min_rate,
+                                city, district, address_a, floor_a, elevator_a, elevator_type_a,
+                                address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, payment_type, people_count, work_hours, logistics_to_addr, created_by
+                         FROM jobs WHERE id=?''', (job_id,))
+            job = c.fetchone()
+            conn.close()
+            if not worker or not job:
+                logger.error(f"worker or job данные отсутствуют: job={job}")
+                return
+
+            operator_id = job[24]  # created_by
+
+            if not operator_id:
+                logger.error(f"Пустой created_by для job_id={job_id}")
+                return
+            try:
+                birthdate = worker[8]
+                age = calc_age(birthdate) if birthdate else "—"
+                worker_name = f"{worker[0]} {worker[1]} {worker[2]}"
+                worker_username = worker[3]
+                worker_phone = worker[4]
+
+                job_type = job[3]
+                jt = job_type.strip().lower()
+                if jt == "погрузочные работы":
+                    show_address_b = bool(job[13] and str(job[13]).strip())
+                    operator_text = build_loader_operator_text(
+                        job_number=job[0],
+                        customer_name=job[1],
+                        customer_phone=job[2],
+                        people_count=job[21],
+                        job_description=job[4],
+                        hour_rate=job[5],
+                        min_rate=job[6],
+                        city=job[7],
+                        district=job[8],
+                        address_a=job[9],
+                        floor_a=job[10],
+                        elevator_a=job[11],
+                        elevator_type_a=job[12],
+                        address_b=job[13] if show_address_b else None,
+                        floor_b=job[14] if show_address_b else None,
+                        elevator_b=job[15] if show_address_b else None,
+                        elevator_type_b=job[16] if show_address_b else None,
+                        logistics=job[19] if show_address_b else None,
+                        start_date=job[17],
+                        start_time=job[18],
+                        payment_type=job[20],
+                        worker_name=worker_name,
+                        worker_username=worker_username,
+                        worker_phone=worker_phone,
+                        worker_age=age
+                    )
+                elif jt == "строительные работы":
+                    logistics_to_addr = job[23]
+                    work_hours = job[22]
+                    if logistics_to_addr and str(logistics_to_addr).strip():
+                        operator_text = build_construction_operator_text_outside_city(
+                            job_number=job[0],
+                            customer_name=job[1],
+                            customer_phone=job[2],
+                            people_count=job[21],
+                            job_description=job[4],
+                            hour_rate=job[5],
+                            min_rate=job[6],
+                            work_hours=work_hours,
+                            city=job[7],
+                            district=job[8],
+                            address_a=job[9],
+                            logistics_to_addr=logistics_to_addr,
+                            start_date=job[17],
+                            start_time=job[18],
+                            payment_type=job[20],
+                            worker_name=worker_name,
+                            worker_username=worker_username,
+                            worker_phone=worker_phone,
+                            worker_age=age
+                        )
+                    else:
+                        operator_text = build_construction_operator_text(
+                            job_number=job[0],
+                            customer_name=job[1],
+                            customer_phone=job[2],
+                            people_count=job[21],
+                            job_description=job[4],
+                            hour_rate=job[5],
+                            min_rate=job[6],
+                            work_hours=job[22],
+                            city=job[7],
+                            district=job[8],
+                            address_a=job[9],
+                            logistics_to_addr=job[23],  # <-- добавлен обязательный аргумент!
+                            start_date=job[17],
+                            start_time=job[18],
+                            payment_type=job[20],
+                            worker_name=worker_name,
+                            worker_username=worker_username,
+                            worker_phone=worker_phone,
+                            worker_age=age
+                        )
+                else:
+                    operator_text = "Ошибка: Неизвестный тип работ"
+
+                bot.send_message(operator_id, operator_text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Ошибка отправки оператору {operator_id}: {e}")
+        logger.info(f"Заявка {job_id} принята пользователем {worker_id}")
     except Exception:
-        return jsonify({'status': 'fail'})
+        logger.exception("Ошибка при принятии заявки")
+@bot.callback_query_handler(func=lambda call: call.data.startswith('decline_'))
+def decline_job(call):
+    try:
+        bot.answer_callback_query(call.id, "Вы отказались от заявки")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception as e:
+            logger.warning(f"Не удалось удалить сообщение у исполнителя: {e}")
+    except Exception:
+        logger.exception("Ошибка при отказе от заявки")
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+    bot.polling(none_stop=True)
