@@ -1,14 +1,323 @@
-{
-  "builds": [
-    {
-      "src": "app.py",
-      "use": "@vercel/python"
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Создание заявки</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        html, body {
+            margin: 0; padding: 0; background: #f4f4f4; width: 100%; height: 100%;
+        }
+        .container {
+            background: #fff; border-radius: 16px; max-width: 100%; width: 98%;
+            margin: 16px auto; padding: 18px 8px 28px 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            font-family: 'Segoe UI', Arial, sans-serif; box-sizing: border-box;
+        }
+        h2 { text-align: center; font-size: 1.3em; margin-bottom: 18px; }
+        label { font-weight: 600; font-size: 1em; margin-bottom: 3px; }
+        input, select { margin-bottom: 10px; padding: 10px 8px; border-radius: 6px; border: 1px solid #ccc; width: 100%; box-sizing: border-box; font-size: 1em; background: #fafbfc; }
+        textarea { margin-bottom: 10px; padding: 10px 8px; border-radius: 6px; border: 1px solid #ccc; width: 100%; box-sizing: border-box; font-size: 1em; background: #fafbfc; resize: vertical; }
+        fieldset { margin-bottom: 12px; padding: 10px 8px 8px 8px; border-radius: 10px; border: 1px solid #e0e0e0; background: #fafbfc; }
+        legend { font-weight: bold; font-size: 1em; }
+        .submit-btn { width: 100%; padding: 14px; background: #00bfae; color: #fff; border: none; border-radius: 8px; font-size: 1.08em; font-weight: 600; cursor: pointer; transition: background 0.18s; margin-top: 12px; margin-bottom: 8px; }
+        .submit-btn:hover { background: #008c81; }
+        @media (max-width: 600px) {
+            .container { border-radius: 0; padding: 10px 2vw 16px 2vw; margin: 0; box-shadow: none; width: 100vw; max-width: 100vw; }
+            input, select, .submit-btn, textarea { font-size: 1em; padding: 10px 7px; }
+            fieldset { padding: 6px 4px 4px 4px; }
+            h2 { font-size: 1.05em; margin-bottom: 10px; }
+        }
+        body, html { overflow-x: hidden; }
+        .checkbox-group { margin-bottom: 10px; }
+        .hidden { display: none; }
+        .checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0 8px 0; }
+        .phone-group { display: flex; align-items: center; margin-bottom: 10px; }
+        .phone-group span { padding: 10px 8px; background: #eee; border-radius: 6px 0 0 6px; border: 1px solid #ccc; border-right: none; font-size: 1em; color: #666; }
+        .phone-group input { border-radius: 0 6px 6px 0; border-left: none; margin-bottom: 0; }
+        #spinner {
+            display: none;
+            margin: 0 auto 10px auto;
+            width: 36px;
+            height: 36px;
+            border: 5px solid #eee;
+            border-top: 5px solid #00bfae;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg);}
+            100% { transform: rotate(360deg);}
+        }
+        #form-message { margin: 10px 0 0 0; padding: 9px 12px; border-radius: 6px; font-size: 1em; }
+        .alert-success { color: green; margin-bottom: 12px; font-weight: bold; }
+        .alert-error { color: red; margin-bottom: 12px; font-weight: bold; }
+        .modal-success {
+            display: none;
+            position: fixed;
+            z-index: 9999;
+            left: 0; top: 0; width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.4);
+            align-items: center; justify-content: center;
+        }
+        .modal-success-content {
+            background: #fff;
+            border-radius: 12px;
+            padding: 32px 18px;
+            text-align: center;
+            font-size: 1.2em;
+            color: #11a067;
+        }
+        .modal-success-content button {
+            margin-top: 18px;
+            padding: 10px 28px;
+            font-size: 1em;
+            background: #00bfae;
+            color: #fff;
+            border: none;
+            border-radius: 7px;
+            cursor: pointer;
+        }
+    </style>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h2>Создание заявки</h2>
+        <form id="jobForm" method="POST" action="/job_request" autocomplete="off">
+            <input type="hidden" name="telegram_id" value="{{ telegram_id }}">
+            <label>Номер заявки</label>
+            <input type="text" name="job_number" value="{{ job_number }}" readonly>
+            <label>Имя заказчика</label>
+            <input type="text" name="customer_name" required>
+            <label>Телефон заказчика</label>
+            <div class="phone-group">
+                <span>+7</span>
+                <input type="text" name="customer_phone" maxlength="10" required placeholder="9XXXXXXXXX" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10)">
+            </div>
+            <label>Вид работ</label>
+            <select name="job_type" id="job_type_select" required>
+                <option value="Погрузочные работы">Погрузочные работы</option>
+                <option value="Строительные работы">Строительные работы</option>
+            </select>
+            <!-- Погрузочные работы -->
+            <div id="loader_fields">
+                <label>Описание работ</label>
+                <textarea name="job_description" required placeholder="Опишите задачу..." rows="3"></textarea>
+                <label>Кол-во человек</label>
+                <input type="number" name="people_count" min="1" required>
+                <label>Ставка в час (₽)</label>
+                <input type="number" name="hour_rate" required>
+                <label>Мин. оплата за смену (₽)</label>
+                <input type="number" name="min_rate" required>
+                <label>Город</label>
+                <select name="city" required>
+                    <option value="Казань">Казань</option>
+                </select>
+                <label>Район</label>
+                <select name="district" required>
+                    <option value="Вахитовский">Вахитовский</option>
+                    <option value="Авиастроительный">Авиастроительный</option>
+                    <option value="Кировский">Кировский</option>
+                    <option value="Московский">Московский</option>
+                    <option value="Ново-Савиновский">Ново-Савиновский</option>
+                    <option value="Советский">Советский</option>
+                    <option value="Приволжский">Приволжский</option>
+                </select>
+                <fieldset>
+                    <legend>Адрес "А"</legend>
+                    <label>Адрес</label>
+                    <input type="text" name="address_a">
+                    <label>Этаж</label>
+                    <input type="number" name="floor_a" min="1">
+                    <label>Лифт</label>
+                    <select name="elevator_a">
+                        <option>да</option>
+                        <option>нет</option>
+                        <option>не требуется</option>
+                    </select>
+                    <label>Вид лифта</label>
+                    <select name="elevator_type_a">
+                        <option>грузовой</option>
+                        <option>пассажирский</option>
+                    </select>
+                </fieldset>
+                <div class="checkbox-inline">
+                    <input type="checkbox" id="show_b" name="show_b">
+                    <label for="show_b" style="margin:0; font-weight:400;">Добавить адрес "Б"</label>
+                </div>
+                <fieldset id="address_b_block" class="hidden">
+                    <legend>Адрес "Б"</legend>
+                    <label>Адрес</label>
+                    <input type="text" name="address_b">
+                    <label>Этаж</label>
+                    <input type="number" name="floor_b" min="1">
+                    <label>Лифт</label>
+                    <select name="elevator_b">
+                        <option>да</option>
+                        <option>нет</option>
+                        <option>не требуется</option>
+                    </select>
+                    <label>Вид лифта</label>
+                    <select name="elevator_type_b">
+                        <option>грузовой</option>
+                        <option>пассажирский</option>
+                    </select>
+                    <label>Логистика между адресами</label>
+                    <select name="logistics">
+                        <option>Предоставляет заказчик</option>
+                        <option>Самостоятельно</option>
+                    </select>
+                </fieldset>
+                <label>Дата начала работы</label>
+                <input type="date" name="start_date" required>
+                <label>Время начала работы</label>
+                <input type="time" name="start_time" required>
+                <label>Вид оплаты</label>
+                <select name="payment_type">
+                    <option>Банковская карта</option>
+                    <option>Наличными</option>
+                </select>
+            </div>
+            <!-- Строительные работы -->
+            <div id="builder_fields" class="hidden">
+                <label>Описание работ</label>
+                <textarea name="job_description" required placeholder="Опишите задачу..." rows="3"></textarea>
+                <label>Кол-во человек</label>
+                <input type="number" name="people_count" min="1" required>
+                <label>Ставка в час (₽)</label>
+                <input type="number" name="hour_rate" required>
+                <label>Мин. оплата за смену (₽)</label>
+                <input type="number" name="min_rate" required>
+                <label>Кол-во рабочих часов</label>
+                <input type="number" name="work_hours" min="1" required>
+                <label>Город</label>
+                <select name="city" required>
+                    <option value="Казань">Казань</option>
+                </select>
+                <label>Район</label>
+                <select name="district" required>
+                    <option value="Вахитовский">Вахитовский</option>
+                    <option value="Авиастроительный">Авиастроительный</option>
+                    <option value="Кировский">Кировский</option>
+                    <option value="Московский">Московский</option>
+                    <option value="Ново-Савиновский">Ново-Савиновский</option>
+                    <option value="Советский">Советский</option>
+                    <option value="Приволжский">Приволжский</option>
+                </select>
+                <label>Адрес</label>
+                <input type="text" name="address_a" required>
+                <div class="checkbox-inline">
+                    <input type="checkbox" id="is_outside_city" name="is_outside_city">
+                    <label for="is_outside_city" style="margin:0; font-weight:400;">За городом</label>
+                </div>
+                <div id="logistics_block" class="hidden">
+    <label>Логистика до адреса</label>
+    <select name="logistics_to_addr">
+        <option value="">Не выбрано</option>
+        <option>Предоставляет заказчик</option>
+        <option>Самостоятельно</option>
+    </select>
+</div>
+                <label>Дата начала работы</label>
+                <input type="date" name="start_date" required>
+                <label>Время начала работы</label>
+                <input type="time" name="start_time" required>
+                <label>Форма оплаты</label>
+                <select name="payment_type">
+                    <option>Банковская карта</option>
+                    <option>Наличными</option>
+                </select>
+            </div>
+            <div id="spinner"></div>
+            <button type="submit" class="submit-btn">Создать заявку</button>
+            <div id="form-message"></div>
+        </form>
+    </div>
+    <div class="modal-success" id="modal-success">
+        <div class="modal-success-content">
+            <div id="modal-success-text">Заявка успешно создана!</div>
+            <button onclick="closeModalSuccess()">OK</button>
+        </div>
+    </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const jobType = document.getElementById('job_type_select');
+        const loaderFields = document.getElementById('loader_fields');
+        const builderFields = document.getElementById('builder_fields');
+        function toggleFields() {
+            if (jobType.value === 'Погрузочные работы') {
+                loaderFields.classList.remove('hidden');
+                builderFields.classList.add('hidden');
+                loaderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = false);
+                builderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = true);
+            } else {
+                loaderFields.classList.add('hidden');
+                builderFields.classList.remove('hidden');
+                builderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = false);
+                loaderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = true);
+            }
+        }
+        jobType.addEventListener('change', toggleFields);
+        toggleFields();
+        const showB = document.getElementById('show_b');
+        const addressB = document.getElementById('address_b_block');
+        if(showB && addressB){
+            showB.addEventListener('change', function() {
+                addressB.classList.toggle('hidden', !this.checked);
+            });
+            addressB.classList.toggle('hidden', !showB.checked);
+        }
+        const outsideCity = document.getElementById('is_outside_city');
+        const logisticsBlock = document.getElementById('logistics_block');
+        if(outsideCity && logisticsBlock){
+            outsideCity.addEventListener('change', function() {
+                logisticsBlock.classList.toggle('hidden', !this.checked);
+            });
+            logisticsBlock.classList.toggle('hidden', !outsideCity.checked);
+        }
+        // AJAX submit + спиннер + модалка успеха
+        document.getElementById('jobForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            document.getElementById('spinner').style.display = 'block';
+            const form = this;
+            const formData = new FormData(form);
+            fetch(form.action, {
+                method: 'POST',
+                body: formData,
+                headers: { 'X-Requested-With': 'XMLHttpRequest' }
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('spinner').style.display = 'none';
+                if (data.status === "ok") {
+                    form.reset();
+                    showModalSuccess(data.message || "Заявка успешно создана!");
+                    setTimeout(() => {
+                        if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close();
+                    }, 1500);
+                } else {
+                    const msgDiv = document.getElementById('form-message');
+                    msgDiv.className = 'alert-error';
+                    msgDiv.textContent = data.message;
+                }
+            })
+            .catch(() => {
+                document.getElementById('spinner').style.display = 'none';
+                const msgDiv = document.getElementById('form-message');
+                msgDiv.className = 'alert-error';
+                msgDiv.textContent = "Ошибка при отправке заявки";
+            });
+        });
+    });
+    function showModalSuccess(msg) {
+        document.getElementById('modal-success-text').textContent = msg;
+        document.getElementById('modal-success').style.display = 'flex';
     }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "/app.py"
+    function closeModalSuccess() {
+        document.getElementById('modal-success').style.display = 'none';
+        if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close();
     }
-  ]
-}
+    </script>
+</body>
+</html>
