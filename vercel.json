@@ -1,323 +1,771 @@
-<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <title>Создание заявки</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" href="/static/style.css">
-    <style>
-        html, body {
-            margin: 0; padding: 0; background: #f4f4f4; width: 100%; height: 100%;
+from flask import Flask, render_template, request, jsonify, redirect, url_for
+import sqlite3
+import requests
+import os
+import logging
+from bot import bot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, date
+from utils.save_avatar import save_avatar
+import random
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
+)
+logger = logging.getLogger("blomblom-flask")
+SUPERADMIN_ID = "350691086"
+BOT_NOTIFY_URL = "https://c9434d554543.ngrok-free.app/notify"
+BOT_ROLE_URL = "https://c9434d554543.ngrok-free.app/notify_role"
+BOT_TOKEN = "8250860304:AAFbp2PMZom6PbYqvNz_Y1DEQEOSRHeryWU"
+
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'static/avatars'
+
+def init_db():
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id TEXT PRIMARY KEY,
+            last_name TEXT,
+            first_name TEXT,
+            middle_name TEXT,
+            username TEXT,
+            birthdate TEXT,
+            city TEXT,
+            district TEXT,
+            phone TEXT,
+            skills TEXT,
+            role TEXT,
+            avatar TEXT,
+            mute_mode INTEGER DEFAULT 0,
+            mute_remind_at TEXT,
+            mute_remind_stage INTEGER DEFAULT 0
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_number TEXT,
+            customer_name TEXT,
+            customer_phone TEXT,
+            job_type TEXT,
+            job_description TEXT,
+            hour_rate INTEGER,
+            min_rate INTEGER,
+            city TEXT,
+            district TEXT,
+            cargo_name TEXT,
+            people_count INTEGER,
+            work_hours INTEGER,
+            address_a TEXT,
+            floor_a INTEGER,
+            elevator_a TEXT,
+            elevator_type_a TEXT,
+            address_b TEXT,
+            floor_b INTEGER,
+            elevator_b TEXT,
+            elevator_type_b TEXT,
+            start_date TEXT,
+            start_time TEXT,
+            logistics TEXT,
+            logistics_to_addr TEXT,
+            payment_type TEXT,
+            status TEXT,
+            created_by TEXT
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS job_accepts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER,
+            worker_telegram_id TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def get_role(telegram_id):
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute('SELECT role FROM users WHERE telegram_id=?', (telegram_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def generate_job_number(city_code, date):
+    # Формируем дату в формате YYMMDD
+    date_str = date.strftime('%y%m%d')  # например, 250812
+    # Считаем заявки за этот день и город
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    # Ищем по номеру заявки, который начинается с '843-250812-'
+    prefix = f"{city_code}-{date_str}-"
+    c.execute("SELECT COUNT(*) FROM jobs WHERE job_number LIKE ?", (f"{prefix}%",))
+    count_today = c.fetchone()[0]
+    conn.close()
+    order_num = count_today + 1
+    job_number = f"{city_code}-{date_str}-{order_num}"
+    return job_number
+# -------------------- ТЕКСТЫ ЗАЯВОК --------------------
+
+def build_loader_executor_text(
+    job_number, job_description, hour_rate, min_rate, city, district,
+    start_date, start_time,
+    address_a, floor_a, elevator_a, elevator_type_a,
+    address_b=None, floor_b=None, elevator_b=None, elevator_type_b=None,
+    logistics=None, payment_type=None
+):
+    def val(v): return v if v not in [None, ""] else "не указано"
+
+    text = (
+        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
+        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
+        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
+        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
+        f"<b>Город:</b> 🌆\n{val(city)}\n\n"
+        f"<b>Район:</b>\n{val(district)}\n\n"
+    )
+
+    text += (
+        f"<b>Адрес А:</b> 📍\n{val(address_a)}\n"
+        f"Этаж: {val(floor_a)}\n"
+        f"Лифт: {val(elevator_a)}\n"
+        f"Вид лифта: {val(elevator_type_a)}\n\n"
+    )
+
+    if address_b and str(address_b).strip():
+        text += (
+            f"<b>Адрес B:</b> 📍\n{val(address_b)}\n"
+            f"Этаж: {val(floor_b)}\n"
+            f"Лифт: {val(elevator_b)}\n"
+            f"Вид лифта: {val(elevator_type_b)}\n\n"
+            f"<b>Логистика между адресам:</b> 🛸\n{val(logistics)}\n\n"
+        )
+
+    text += (
+        f"<b>Дата начала работы:</b> 📅\n{val(start_date)}\n\n"
+        f"<b>Время начала работы:</b> 🕗\n{val(start_time)}\n\n"
+        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n"
+    )
+
+    return text
+
+def build_loader_operator_text(
+    job_number, customer_name, customer_phone, people_count,
+    job_description, hour_rate, min_rate, city, district,
+    address_a, floor_a, elevator_a, elevator_type_a,
+    address_b=None, floor_b=None, elevator_b=None, elevator_type_b=None,
+    logistics=None, start_date=None, start_time=None, payment_type=None,
+    worker_name=None, worker_username=None, worker_phone=None, worker_age=None
+):
+    def val(x):
+        return x if x not in [None, ""] else "не указано"
+    def tel(x):
+        # Формируем ссылку, если номер можно кликнуть
+        num = str(x).replace("+7", "").replace(" ", "").replace("-", "")
+        return f'<a href="tel:+7{num}">+7{num}</a>' if num.isdigit() and len(num) == 10 else val(x)
+
+    text = (
+        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
+        f"<b>Имя заказчика:</b> {val(customer_name)}\n\n"
+        f"<b>Контактный номер заказчика:</b> {tel(customer_phone)}\n\n"
+        f"<b>Кол-во человек:</b> {val(people_count)}\n\n"
+        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
+        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
+        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
+        f"<b>Город:</b> 🌆\n{val(city)}\n\n"
+        f"<b>Район:</b>\n{val(district)}\n\n"
+    )
+
+    text += (
+        f"<b>Адрес А:</b> 📍\n{val(address_a)}\n"
+        f"Этаж: {val(floor_a)}\n"
+        f"Лифт: {val(elevator_a)}\n"
+        f"Вид лифта: {val(elevator_type_a)}\n\n"
+    )
+
+    if address_b and str(address_b).strip():
+        text += (
+            f"<b>Адрес B:</b> 📍\n{val(address_b)}\n"
+            f"Этаж: {val(floor_b)}\n"
+            f"Лифт: {val(elevator_b)}\n"
+            f"Вид лифта: {val(elevator_type_b)}\n\n"
+            f"<b>Логистика между адресам:</b> 🛸\n{val(logistics)}\n\n"
+        )
+
+    text += (
+        f"<b>Дата начала работы:</b> 📅\n{val(start_date)}\n\n"
+        f"<b>Время начала работы:</b> 🕗\n{val(start_time)}\n\n"
+        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n\n"
+    )
+
+    # Блок исполнителя, если он есть
+    if worker_name:
+        text += (
+            f"<b>Откликнувшийся исполнитель 🧑‍🔧</b>\n\n"
+            f"<b>Имя:</b> 📝\n{val(worker_name)}\n\n"
+            f"<b>Телеграм:</b>\n@{val(worker_username)}\n\n"
+            f"<b>Телефон:</b>\n{tel(worker_phone)}\n\n"
+            f"<b>Возраст:</b>\n{val(worker_age)}\n"
+        )
+
+    return text
+
+def build_construction_executor_text(
+    job_number, job_description, hour_rate, min_rate, work_hours,
+    city, district, address_a, logistics_to_addr,
+    start_date, start_time, payment_type
+):
+    def val(v): return v if v not in [None, ""] else "не указано"
+
+    # Добавил вывод для отладки
+    print(f"logistics_to_addr = '{logistics_to_addr}'")
+
+    text = (
+        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
+        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
+        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
+        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
+        f"<b>Кол-во рабочих часов:</b> ⏳\n{val(work_hours)}\n\n"
+        f"<b>Город:</b> 🌆\n{val(city)}\n\n"
+        f"<b>Район:</b>\n{val(district)}\n\n"
+        f"<b>Адрес:</b> 📍\n{val(address_a)}\n\n"
+    )
+
+    if logistics_to_addr and str(logistics_to_addr).strip():
+        text += (
+            f"<b>Логистика до адреса и обратно:</b> 🛸\n{logistics_to_addr}\n\n"
+        )
+
+    text += (
+        f"<b>Дата начало работы:</b> 📅\n{val(start_date)}\n\n"
+        f"<b>Время начала работы:</b> 🕗\n{val(start_time)}\n\n"
+        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n"
+    )
+
+    return text
+def build_construction_operator_text(
+    job_number, customer_name, customer_phone, people_count, job_description,
+    hour_rate, min_rate, work_hours, city, district, address_a, logistics_to_addr,
+    start_date, start_time, payment_type, worker_name, worker_username, worker_phone, worker_age
+):
+    def val(v): return v if v not in [None, ""] else "не указано"
+    def tel(x):
+        num = str(x).replace("+7", "").replace(" ", "").replace("-", "")
+        return f'<a href="tel:+7{num}">+7{num}</a>' if num.isdigit() and len(num) == 10 else val(x)
+
+    text = (
+        f"<b>Заявка № {val(job_number)}</b> 🚀\n\n"
+        f"<b>Имя заказчика:</b> {val(customer_name)}\n\n"
+        f"<b>Контактный номер заказчика:</b> {tel(customer_phone)}\n\n"
+        f"<b>Кол-во человек:</b> {val(people_count)}\n\n"
+        f"<b>Описание работ:</b> 📝\n{val(job_description)}\n\n"
+        f"<b>Ставка в час:</b> 💰\n{val(hour_rate)} ₽\n\n"
+        f"<b>Минимальная оплата за смену:</b> 💰\n{val(min_rate)} ₽\n\n"
+        f"<b>Кол-во рабочих часов:</b> ⏳\n{val(work_hours)}\n\n"
+        f"<b>Город:</b> 🏙\n{val(city)}\n\n"
+        f"<b>Район :</b>\n{val(district)}\n\n"
+        f"<b>Адрес:</b> 📍\n{val(address_a)}\n\n"
+    )
+
+    # Блок логистики только если есть и не пусто, и не строка 'None'
+    if logistics_to_addr and str(logistics_to_addr).strip().lower() != "none":
+        text += (
+            f"<b>Логистика до адреса и обратно:</b> 🛸\n{val(logistics_to_addr)}\n\n"
+        )
+
+    text += (
+        f"<b>Дата начало работы:</b> 🗓\n{val(start_date)}\n\n"
+        f"<b>Время начала работы ⏰</b>\n{val(start_time)}\n\n"
+        f"<b>Форма оплаты:</b> 💳\n{val(payment_type)}\n\n"
+        f"<b>Откликнувшийся исполнитель</b> 👷\n\n"
+        f"<b>Имя:</b> 📝\n{val(worker_name)}\n\n"
+        f"<b>Телеграм:</b> ✉️\n@{val(worker_username)}\n\n"
+        f"<b>Телефон:</b> 📱\n{tel(worker_phone)}\n\n"
+        f"<b>Возраст:</b> 📔\n{val(worker_age)}\n"
+    )
+    return text
+
+# -------------------- /job_form --------------------
+@app.route('/job_form')
+def job_form():
+    telegram_id = request.args.get('telegram')
+    role = get_role(telegram_id)
+    if role != 'operator':
+        return "Только операторы могут создавать заявки", 403
+    city_code = "843"
+    today = datetime.now()
+    job_number = generate_job_number(city_code, today)
+
+    districts = [
+        "Вахитовский", "Авиастроительный", "Кировский",
+        "Московский", "Ново-Савиновский", "Советский", "Приволжский"
+    ]
+    cities = ["Казань"]
+    lifts = ["нет", "да", "не требуется"]
+    elevator_types = ["грузовой", "пассажирский"]
+    payment_types = ["Банковская карта", "Наличными"]
+    logistics_between = ["Предоставляет заказчик", "Самостоятельно"]
+    logistics_to_addr = ["Предоставляет заказчик", "Самостоятельно"]
+
+    return render_template(
+        'job_form.html',
+        telegram_id=telegram_id,
+        job_number=job_number,
+        districts=districts,
+        cities=cities,
+        lifts=lifts,
+        elevator_types=elevator_types,
+        payment_types=payment_types,
+        logistics_between=logistics_between,
+        logistics_to_addr=logistics_to_addr
+    )
+
+# -------------------- /job_request --------------------
+@app.route('/job_request', methods=['POST'])
+def job_request():
+    try:
+        data = request.form
+        job_number = data.get('job_number')
+        customer_name = data.get('customer_name')
+        customer_phone = data.get('customer_phone', '')
+        if not customer_phone.isdigit() or len(customer_phone) != 10:
+            return jsonify({
+                'status': 'error',
+                'error': 'customer_phone_invalid',
+                'field': 'customer_phone',
+                'message': 'Введите 10-значный номер телефона заказчика без +7!'
+            }), 400
+
+        job_type = data.get('job_type')
+        job_description = data.get('job_description', '')
+        hour_rate = data.get('hour_rate')
+        min_rate = data.get('min_rate')
+        city = data.get('city')
+        district = data.get('district')
+        cargo_name = data.get('cargo_name')
+        people_count = data.get('people_count')
+        work_hours = data.get('work_hours')
+        address_a = data.get('address_a')
+        floor_a = data.get('floor_a')
+        elevator_a = data.get('elevator_a')
+        elevator_type_a = data.get('elevator_type_a')
+        address_b = data.get('address_b')
+        floor_b = data.get('floor_b')
+        elevator_b = data.get('elevator_b')
+        elevator_type_b = data.get('elevator_type_b')
+        start_date = data.get('start_date')
+        start_time = data.get('start_time')
+        logistics = data.get('logistics')
+        logistics_to_addr = data.get('logistics_to_addr')
+        payment_type = data.get('payment_type')
+        telegram_id = data.get('telegram_id')
+
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO jobs (
+                job_number, customer_name, customer_phone, job_type, job_description, hour_rate, min_rate, city, district, cargo_name,
+                people_count, work_hours, address_a, floor_a, elevator_a, elevator_type_a,
+                address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, logistics_to_addr, payment_type, status, created_by
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', (
+            job_number, customer_name, "+7" + customer_phone, job_type, job_description, hour_rate, min_rate, city, district, cargo_name,
+            people_count, work_hours, address_a, floor_a, elevator_a, elevator_type_a,
+            address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, logistics_to_addr, payment_type,
+            "new", telegram_id
+        ))
+        job_id = c.lastrowid
+
+        # Фильтрация по навыкам: skills
+        c.execute('SELECT telegram_id, skills FROM users WHERE city=? AND role="worker" AND (mute_mode IS NULL OR mute_mode=0)', (city,))
+        workers = c.fetchall()
+        sent_count = 0
+        errors = []
+        sent_to = []
+
+        # Формируем текст заявки для исполнителя
+        if job_type == "Погрузочные работы":
+            job_text = build_loader_executor_text(
+                job_number=job_number or job_id,
+                job_description=job_description,
+                hour_rate=hour_rate,
+                min_rate=min_rate,
+                city=city,
+                district=district,
+                start_date=start_date,
+                start_time=start_time,
+                address_a=address_a,
+                floor_a=floor_a,
+                elevator_a=elevator_a,
+                elevator_type_a=elevator_type_a,
+                address_b=address_b,
+                floor_b=floor_b,
+                elevator_b=elevator_b,
+                elevator_type_b=elevator_type_b,
+                logistics=logistics,
+                payment_type=payment_type
+            )
+        elif job_type == "Строительные работы":
+            job_text = build_construction_executor_text(
+                job_number=job_number or job_id,
+                job_description=job_description,
+                hour_rate=hour_rate,
+                min_rate=min_rate,
+                work_hours=work_hours,
+                city=city,
+                district=district,
+                address_a=address_a,
+                logistics_to_addr=logistics_to_addr,
+                start_date=start_date,
+                start_time=start_time,
+                payment_type=payment_type
+            )
+        else:
+            job_text = "Ошибка: Неизвестный вид работ"
+
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("Принять ✅", callback_data=f"accept_{job_id}"),
+            InlineKeyboardButton("Отказаться 😢", callback_data=f"decline_{job_id}")
+        )
+
+        for w in workers:
+            worker_telegram_id = w[0]
+            worker_skills = w[1] or ''
+            # Фильтрация: только если навык выбран!
+            skills_list = [s.strip() for s in worker_skills.split(',') if s.strip()]
+            if job_type not in skills_list:
+                continue  # Пропустить если не подходит навык
+            try:
+                # --- ИСПРАВЛЕНО parse_mode ---
+                msg = bot.send_message(worker_telegram_id, job_text, reply_markup=markup, parse_mode="HTML")
+                sent_count += 1
+                sent_to.append(str(worker_telegram_id))
+                # Сохраняем message_id для удаления заявки, если это нужно
+                c.execute("INSERT INTO job_messages (job_id, telegram_id, message_id) VALUES (?, ?, ?)", (job_id, worker_telegram_id, msg.message_id))
+            except Exception as e:
+                errors.append({'telegram_id': worker_telegram_id, 'error': str(e)})
+
+        conn.commit()
+        conn.close()
+        logger.info(f"Заявка {job_id} отправлена {sent_count} пользователям: {', '.join(sent_to)}")
+        if errors:
+            logger.warning(f"Ошибки отправки: {errors}")
+        # Добавлено уведомление, которое используется на фронте!
+        return jsonify({
+            'status': 'ok',
+            'sent_count': sent_count,
+            'errors': errors,
+            'message': 'Заявка успешно создана!'
+        })
+    except Exception as e:
+        logger.exception("Ошибка при создании заявки")
+        return jsonify({'status': 'error', 'error': str(e), 'message': 'Ошибка при создании заявки'}), 500
+
+# Для заявки оператору после принятия исполнителем
+def send_job_accept_to_operator(job_id, worker_id):
+    try:
+        conn = sqlite3.connect('static/users.db')
+        c = conn.cursor()
+        c.execute('SELECT last_name, first_name, middle_name, username, phone, birthdate FROM users WHERE telegram_id=?', (worker_id,))
+        worker = c.fetchone()
+        c.execute('''SELECT job_number, customer_name, customer_phone, people_count, job_description, hour_rate, min_rate,
+                            city, district, address_a, floor_a, elevator_a, elevator_type_a,
+                            address_b, floor_b, elevator_b, elevator_type_b, start_date, start_time, logistics, payment_type, created_by
+                        FROM jobs WHERE id=?''', (job_id,))
+        job = c.fetchone()
+        conn.close()
+        if worker and job:
+            job_number, customer_name, customer_phone, people_count, job_description, hour_rate, min_rate, \
+            city, district, address_a, floor_a, elevator_a, elevator_type_a, address_b, floor_b, elevator_b, \
+            elevator_type_b, start_date, start_time, logistics, payment_type, operator_id = job
+            worker_name = f"{worker[0]} {worker[1]} {worker[2]}"
+            worker_username = worker[3]
+            worker_phone = worker[4]
+            birthdate = worker[5]
+            # расчет возраста
+            age = ""
+            if birthdate:
+                try:
+                    from datetime import date
+                    bd = datetime.strptime(birthdate, "%Y-%m-%d").date()
+                    today = date.today()
+                    age = today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+                except:
+                    age = ""
+            operator_text = build_loader_operator_text(
+                job_number=job_number,
+                customer_name=customer_name,
+                customer_phone=customer_phone.replace("+7", ""),
+                people_count=people_count,
+                job_description=job_description,
+                hour_rate=hour_rate,
+                min_rate=min_rate,
+                city=city,
+                district=district,
+                address_a=address_a,
+                floor_a=floor_a,
+                elevator_a=elevator_a,
+                elevator_type_a=elevator_type_a,
+                address_b=address_b,
+                floor_b=floor_b,
+                elevator_b=elevator_b,
+                elevator_type_b=elevator_type_b,
+                logistics=logistics,
+                start_date=start_date,
+                start_time=start_time,
+                payment_type=payment_type,
+                worker_name=worker_name,
+                worker_username=worker_username,
+                worker_phone=worker_phone,
+                worker_age=age
+            )
+            # --- ИСПРАВЛЕНО parse_mode ---
+            bot.send_message(operator_id, operator_text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Ошибка отправки оператору: {e}")
+# Остальные функции (регистрация, профиль, админка и т.д.) остаются без изменений
+
+@app.route('/webapp')
+def webapp():
+    telegram_id = request.args.get('telegram')
+    today = date.today().strftime("%Y-%m-%d")
+    return render_template('register.html', telegram_id=telegram_id, today=today)
+
+@app.route('/register', methods=['POST'])
+def register():
+    import re
+    import requests
+    from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+
+    data = request.form
+    telegram_id = data.get('telegram_id')
+    avatar_file = request.files.get('avatar')
+
+    if not avatar_file or avatar_file.filename.strip() == '':
+        return jsonify({'status': 'error', 'error': 'avatar_required', 'message': 'Пожалуйста, выберите фото для профиля!'}), 400
+
+    phone = data.get('phone', '')
+    if not phone.isdigit() or len(phone) != 10:
+        return jsonify({'status': 'error', 'error': 'phone_invalid', 'field': 'phone', 'message': 'Введите 10-значный номер телефона!'}), 400
+
+    username = data.get('username', '')
+    if not re.fullmatch(r'[a-zA-Z0-9_]{5,32}', username):
+        return jsonify({'status': 'error', 'error': 'username_invalid', 'field': 'username', 'message': 'Некорректный username!'}), 400
+
+    avatar_filename = save_avatar(avatar_file, telegram_id)
+
+    last_name = data.get('last_name', '')
+    first_name = data.get('first_name', '')
+    middle_name = data.get('middle_name', '')
+    birthdate = data.get('birthdate', '')
+    city = data.get('city', '')
+    district = data.get('district', '')
+    skills = data.getlist('skills')
+    if isinstance(skills, list):
+        skills = ', '.join(skills)
+
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute('SELECT role FROM users WHERE telegram_id=?', (telegram_id,))
+    role = c.fetchone()
+    if not role:
+        c.execute('''
+            INSERT OR REPLACE INTO users (telegram_id, last_name, first_name, middle_name, username, birthdate, city, district, phone, skills, role, avatar, mute_mode, mute_remind_at, mute_remind_stage)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)
+        ''', (
+            telegram_id,
+            last_name,
+            first_name,
+            middle_name,
+            username,
+            birthdate,
+            city,
+            district,
+            phone,
+            skills,
+            'worker',
+            avatar_filename
+        ))
+    else:
+        c.execute('''
+            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=?, avatar=? WHERE telegram_id=?
+        ''', (
+            last_name,
+            first_name,
+            middle_name,
+            username,
+            birthdate,
+            city,
+            district,
+            phone,
+            skills,
+            avatar_filename,
+            telegram_id
+        ))
+    conn.commit()
+    conn.close()
+
+    profile_url = f"https://821c5e5165f4.ngrok-free.app/profile/{telegram_id}"
+
+    try:
+        # Меню для обычного режима (mute_mode == 0)
+        reply_markup = {
+            "keyboard": [
+                [ {"text": "Без звучный режим 🔕"} ],
+                [ {
+                    "text": "Личный кабинет 🗂",
+                    "web_app": { "url": profile_url }
+                } ]
+            ],
+            "resize_keyboard": True,
+            "one_time_keyboard": False
         }
-        .container {
-            background: #fff; border-radius: 16px; max-width: 100%; width: 98%;
-            margin: 16px auto; padding: 18px 8px 28px 8px; box-shadow: 0 4px 24px rgba(0,0,0,0.08);
-            font-family: 'Segoe UI', Arial, sans-serif; box-sizing: border-box;
-        }
-        h2 { text-align: center; font-size: 1.3em; margin-bottom: 18px; }
-        label { font-weight: 600; font-size: 1em; margin-bottom: 3px; }
-        input, select { margin-bottom: 10px; padding: 10px 8px; border-radius: 6px; border: 1px solid #ccc; width: 100%; box-sizing: border-box; font-size: 1em; background: #fafbfc; }
-        textarea { margin-bottom: 10px; padding: 10px 8px; border-radius: 6px; border: 1px solid #ccc; width: 100%; box-sizing: border-box; font-size: 1em; background: #fafbfc; resize: vertical; }
-        fieldset { margin-bottom: 12px; padding: 10px 8px 8px 8px; border-radius: 10px; border: 1px solid #e0e0e0; background: #fafbfc; }
-        legend { font-weight: bold; font-size: 1em; }
-        .submit-btn { width: 100%; padding: 14px; background: #00bfae; color: #fff; border: none; border-radius: 8px; font-size: 1.08em; font-weight: 600; cursor: pointer; transition: background 0.18s; margin-top: 12px; margin-bottom: 8px; }
-        .submit-btn:hover { background: #008c81; }
-        @media (max-width: 600px) {
-            .container { border-radius: 0; padding: 10px 2vw 16px 2vw; margin: 0; box-shadow: none; width: 100vw; max-width: 100vw; }
-            input, select, .submit-btn, textarea { font-size: 1em; padding: 10px 7px; }
-            fieldset { padding: 6px 4px 4px 4px; }
-            h2 { font-size: 1.05em; margin-bottom: 10px; }
-        }
-        body, html { overflow-x: hidden; }
-        .checkbox-group { margin-bottom: 10px; }
-        .hidden { display: none; }
-        .checkbox-inline { display: flex; align-items: center; gap: 8px; margin: 10px 0 8px 0; }
-        .phone-group { display: flex; align-items: center; margin-bottom: 10px; }
-        .phone-group span { padding: 10px 8px; background: #eee; border-radius: 6px 0 0 6px; border: 1px solid #ccc; border-right: none; font-size: 1em; color: #666; }
-        .phone-group input { border-radius: 0 6px 6px 0; border-left: none; margin-bottom: 0; }
-        #spinner {
-            display: none;
-            margin: 0 auto 10px auto;
-            width: 36px;
-            height: 36px;
-            border: 5px solid #eee;
-            border-top: 5px solid #00bfae;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg);}
-            100% { transform: rotate(360deg);}
-        }
-        #form-message { margin: 10px 0 0 0; padding: 9px 12px; border-radius: 6px; font-size: 1em; }
-        .alert-success { color: green; margin-bottom: 12px; font-weight: bold; }
-        .alert-error { color: red; margin-bottom: 12px; font-weight: bold; }
-        .modal-success {
-            display: none;
-            position: fixed;
-            z-index: 9999;
-            left: 0; top: 0; width: 100vw; height: 100vh;
-            background: rgba(0,0,0,0.4);
-            align-items: center; justify-content: center;
-        }
-        .modal-success-content {
-            background: #fff;
-            border-radius: 12px;
-            padding: 32px 18px;
-            text-align: center;
-            font-size: 1.2em;
-            color: #11a067;
-        }
-        .modal-success-content button {
-            margin-top: 18px;
-            padding: 10px 28px;
-            font-size: 1em;
-            background: #00bfae;
-            color: #fff;
-            border: none;
-            border-radius: 7px;
-            cursor: pointer;
-        }
-    </style>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-</head>
-<body>
-    <div class="container">
-        <h2>Создание заявки</h2>
-        <form id="jobForm" method="POST" action="/job_request" autocomplete="off">
-            <input type="hidden" name="telegram_id" value="{{ telegram_id }}">
-            <label>Номер заявки</label>
-            <input type="text" name="job_number" value="{{ job_number }}" readonly>
-            <label>Имя заказчика</label>
-            <input type="text" name="customer_name" required>
-            <label>Телефон заказчика</label>
-            <div class="phone-group">
-                <span>+7</span>
-                <input type="text" name="customer_phone" maxlength="10" required placeholder="9XXXXXXXXX" oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10)">
-            </div>
-            <label>Вид работ</label>
-            <select name="job_type" id="job_type_select" required>
-                <option value="Погрузочные работы">Погрузочные работы</option>
-                <option value="Строительные работы">Строительные работы</option>
-            </select>
-            <!-- Погрузочные работы -->
-            <div id="loader_fields">
-                <label>Описание работ</label>
-                <textarea name="job_description" required placeholder="Опишите задачу..." rows="3"></textarea>
-                <label>Кол-во человек</label>
-                <input type="number" name="people_count" min="1" required>
-                <label>Ставка в час (₽)</label>
-                <input type="number" name="hour_rate" required>
-                <label>Мин. оплата за смену (₽)</label>
-                <input type="number" name="min_rate" required>
-                <label>Город</label>
-                <select name="city" required>
-                    <option value="Казань">Казань</option>
-                </select>
-                <label>Район</label>
-                <select name="district" required>
-                    <option value="Вахитовский">Вахитовский</option>
-                    <option value="Авиастроительный">Авиастроительный</option>
-                    <option value="Кировский">Кировский</option>
-                    <option value="Московский">Московский</option>
-                    <option value="Ново-Савиновский">Ново-Савиновский</option>
-                    <option value="Советский">Советский</option>
-                    <option value="Приволжский">Приволжский</option>
-                </select>
-                <fieldset>
-                    <legend>Адрес "А"</legend>
-                    <label>Адрес</label>
-                    <input type="text" name="address_a">
-                    <label>Этаж</label>
-                    <input type="number" name="floor_a" min="1">
-                    <label>Лифт</label>
-                    <select name="elevator_a">
-                        <option>да</option>
-                        <option>нет</option>
-                        <option>не требуется</option>
-                    </select>
-                    <label>Вид лифта</label>
-                    <select name="elevator_type_a">
-                        <option>грузовой</option>
-                        <option>пассажирский</option>
-                    </select>
-                </fieldset>
-                <div class="checkbox-inline">
-                    <input type="checkbox" id="show_b" name="show_b">
-                    <label for="show_b" style="margin:0; font-weight:400;">Добавить адрес "Б"</label>
-                </div>
-                <fieldset id="address_b_block" class="hidden">
-                    <legend>Адрес "Б"</legend>
-                    <label>Адрес</label>
-                    <input type="text" name="address_b">
-                    <label>Этаж</label>
-                    <input type="number" name="floor_b" min="1">
-                    <label>Лифт</label>
-                    <select name="elevator_b">
-                        <option>да</option>
-                        <option>нет</option>
-                        <option>не требуется</option>
-                    </select>
-                    <label>Вид лифта</label>
-                    <select name="elevator_type_b">
-                        <option>грузовой</option>
-                        <option>пассажирский</option>
-                    </select>
-                    <label>Логистика между адресами</label>
-                    <select name="logistics">
-                        <option>Предоставляет заказчик</option>
-                        <option>Самостоятельно</option>
-                    </select>
-                </fieldset>
-                <label>Дата начала работы</label>
-                <input type="date" name="start_date" required>
-                <label>Время начала работы</label>
-                <input type="time" name="start_time" required>
-                <label>Вид оплаты</label>
-                <select name="payment_type">
-                    <option>Банковская карта</option>
-                    <option>Наличными</option>
-                </select>
-            </div>
-            <!-- Строительные работы -->
-            <div id="builder_fields" class="hidden">
-                <label>Описание работ</label>
-                <textarea name="job_description" required placeholder="Опишите задачу..." rows="3"></textarea>
-                <label>Кол-во человек</label>
-                <input type="number" name="people_count" min="1" required>
-                <label>Ставка в час (₽)</label>
-                <input type="number" name="hour_rate" required>
-                <label>Мин. оплата за смену (₽)</label>
-                <input type="number" name="min_rate" required>
-                <label>Кол-во рабочих часов</label>
-                <input type="number" name="work_hours" min="1" required>
-                <label>Город</label>
-                <select name="city" required>
-                    <option value="Казань">Казань</option>
-                </select>
-                <label>Район</label>
-                <select name="district" required>
-                    <option value="Вахитовский">Вахитовский</option>
-                    <option value="Авиастроительный">Авиастроительный</option>
-                    <option value="Кировский">Кировский</option>
-                    <option value="Московский">Московский</option>
-                    <option value="Ново-Савиновский">Ново-Савиновский</option>
-                    <option value="Советский">Советский</option>
-                    <option value="Приволжский">Приволжский</option>
-                </select>
-                <label>Адрес</label>
-                <input type="text" name="address_a" required>
-                <div class="checkbox-inline">
-                    <input type="checkbox" id="is_outside_city" name="is_outside_city">
-                    <label for="is_outside_city" style="margin:0; font-weight:400;">За городом</label>
-                </div>
-                <div id="logistics_block" class="hidden">
-    <label>Логистика до адреса</label>
-    <select name="logistics_to_addr">
-        <option value="">Не выбрано</option>
-        <option>Предоставляет заказчик</option>
-        <option>Самостоятельно</option>
-    </select>
-</div>
-                <label>Дата начала работы</label>
-                <input type="date" name="start_date" required>
-                <label>Время начала работы</label>
-                <input type="time" name="start_time" required>
-                <label>Форма оплаты</label>
-                <select name="payment_type">
-                    <option>Банковская карта</option>
-                    <option>Наличными</option>
-                </select>
-            </div>
-            <div id="spinner"></div>
-            <button type="submit" class="submit-btn">Создать заявку</button>
-            <div id="form-message"></div>
-        </form>
-    </div>
-    <div class="modal-success" id="modal-success">
-        <div class="modal-success-content">
-            <div id="modal-success-text">Заявка успешно создана!</div>
-            <button onclick="closeModalSuccess()">OK</button>
-        </div>
-    </div>
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        const jobType = document.getElementById('job_type_select');
-        const loaderFields = document.getElementById('loader_fields');
-        const builderFields = document.getElementById('builder_fields');
-        function toggleFields() {
-            if (jobType.value === 'Погрузочные работы') {
-                loaderFields.classList.remove('hidden');
-                builderFields.classList.add('hidden');
-                loaderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = false);
-                builderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = true);
-            } else {
-                loaderFields.classList.add('hidden');
-                builderFields.classList.remove('hidden');
-                builderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = false);
-                loaderFields.querySelectorAll('input, select, textarea').forEach(el => el.disabled = true);
+        msg = (
+            "Ваш профиль успешно зарегистрирован 🎊\n\n"
+            "Вот ваша анкета и доступные функции:"
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": telegram_id,
+                "text": msg,
+                "reply_markup": reply_markup
             }
-        }
-        jobType.addEventListener('change', toggleFields);
-        toggleFields();
-        const showB = document.getElementById('show_b');
-        const addressB = document.getElementById('address_b_block');
-        if(showB && addressB){
-            showB.addEventListener('change', function() {
-                addressB.classList.toggle('hidden', !this.checked);
-            });
-            addressB.classList.toggle('hidden', !showB.checked);
-        }
-        const outsideCity = document.getElementById('is_outside_city');
-        const logisticsBlock = document.getElementById('logistics_block');
-        if(outsideCity && logisticsBlock){
-            outsideCity.addEventListener('change', function() {
-                logisticsBlock.classList.toggle('hidden', !this.checked);
-            });
-            logisticsBlock.classList.toggle('hidden', !outsideCity.checked);
-        }
-        // AJAX submit + спиннер + модалка успеха
-        document.getElementById('jobForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            document.getElementById('spinner').style.display = 'block';
-            const form = this;
-            const formData = new FormData(form);
-            fetch(form.action, {
-                method: 'POST',
-                body: formData,
-                headers: { 'X-Requested-With': 'XMLHttpRequest' }
-            })
-            .then(response => response.json())
-            .then(data => {
-                document.getElementById('spinner').style.display = 'none';
-                if (data.status === "ok") {
-                    form.reset();
-                    showModalSuccess(data.message || "Заявка успешно создана!");
-                    setTimeout(() => {
-                        if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close();
-                    }, 1500);
-                } else {
-                    const msgDiv = document.getElementById('form-message');
-                    msgDiv.className = 'alert-error';
-                    msgDiv.textContent = data.message;
-                }
-            })
-            .catch(() => {
-                document.getElementById('spinner').style.display = 'none';
-                const msgDiv = document.getElementById('form-message');
-                msgDiv.className = 'alert-error';
-                msgDiv.textContent = "Ошибка при отправке заявки";
-            });
-        });
-    });
-    function showModalSuccess(msg) {
-        document.getElementById('modal-success-text').textContent = msg;
-        document.getElementById('modal-success').style.display = 'flex';
-    }
-    function closeModalSuccess() {
-        document.getElementById('modal-success').style.display = 'none';
-        if (window.Telegram && Telegram.WebApp) Telegram.WebApp.close();
-    }
-    </script>
-</body>
-</html>
+        )
+    except Exception as e:
+        print("Ошибка отправки сообщения боту:", e)
+
+    return jsonify({'status': 'ok'})
+
+def calc_age(birthdate_str):
+    try:
+        bdate = datetime.strptime(birthdate_str, "%Y-%m-%d").date()
+        today = date.today()
+        age = today.year - bdate.year - ((today.month, today.day) < (bdate.month, bdate.day))
+        return age
+    except Exception:
+        return ""
+
+@app.route('/profile/<telegram_id>', methods=['GET'])
+def profile(telegram_id):
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute('SELECT last_name, first_name, middle_name, username, birthdate, city, district, phone, skills, role, avatar FROM users WHERE telegram_id=?', (telegram_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        birthdate = row[4]
+        age = calc_age(birthdate) if birthdate else ""
+        return render_template(
+            'profile.html',
+            telegram_id=telegram_id,
+            last_name=row[0],
+            first_name=row[1],
+            middle_name=row[2],
+            username=row[3],
+            birthdate=birthdate,
+            age=age,
+            city=row[5],
+            district=row[6],
+            phone=row[7],
+            skills=row[8],
+            role=row[9],
+            avatar=row[10]
+        )
+    else:
+        return "Профиль не найден", 404
+
+@app.route('/edit_profile/<telegram_id>', methods=['POST'])
+def edit_profile(telegram_id):
+    data = request.form
+    avatar_file = request.files.get('avatar')
+    avatar_filename = save_avatar(avatar_file, telegram_id) if avatar_file and avatar_file.filename else None
+    birthdate = data.get('birthdate', '')
+    skills = data.getlist('skills')
+    if isinstance(skills, list):
+        skills = ', '.join(skills)
+
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    if avatar_filename:
+        c.execute('''
+            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=?, avatar=? WHERE telegram_id=?
+        ''', (
+            data.get('last_name'),
+            data.get('first_name'),
+            data.get('middle_name'),
+            data.get('username'),
+            birthdate,
+            data.get('city'),
+            data.get('district'),
+            data.get('phone'),
+            skills,
+            avatar_filename,
+            telegram_id
+        ))
+    else:
+        c.execute('''
+            UPDATE users SET last_name=?, first_name=?, middle_name=?, username=?, birthdate=?, city=?, district=?, phone=?, skills=? WHERE telegram_id=?
+        ''', (
+            data.get('last_name'),
+            data.get('first_name'),
+            data.get('middle_name'),
+            data.get('username'),
+            birthdate,
+            data.get('city'),
+            data.get('district'),
+            data.get('phone'),
+            skills,
+            telegram_id
+        ))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('profile', telegram_id=telegram_id))
+
+@app.route('/admin/users', methods=['GET', 'POST'])
+def admin_users():
+    telegram_id = request.args.get('telegram')
+    if telegram_id != SUPERADMIN_ID:
+        return "Только суперадмин может управлять пользователями!", 403
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    if request.method == 'POST':
+        user_id = request.form['telegram_id']
+        role = request.form.get('role', 'operator')
+        c.execute('INSERT OR REPLACE INTO users (telegram_id, role) VALUES (?, ?)', (user_id, role))
+        conn.commit()
+        try:
+            requests.post(BOT_ROLE_URL, json={'telegram_id': user_id, 'role': role})
+        except Exception:
+            pass
+    c.execute('SELECT telegram_id, role FROM users WHERE role IN ("operator", "admin")')
+    users = c.fetchall()
+    conn.close()
+    return render_template('users_admin.html', users=users, superadmin_id=SUPERADMIN_ID)
+
+@app.route('/admin/delete_user', methods=['POST'])
+def delete_user():
+    telegram_id = request.form['telegram_id']
+    conn = sqlite3.connect('static/users.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM users WHERE telegram_id=? AND role IN ("operator", "admin")', (telegram_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('admin_users', telegram=SUPERADMIN_ID))
+
+@app.route('/send_job/<int:job_id>', methods=['POST'])
+def send_job(job_id):
+    try:
+        resp = requests.post(BOT_NOTIFY_URL, json={'job_id': job_id})
+        return resp.json()
+    except Exception:
+        return jsonify({'status': 'fail'})
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000)
